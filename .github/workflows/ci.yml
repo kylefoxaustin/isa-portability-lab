@@ -1,0 +1,69 @@
+name: ci
+
+# Every push and PR: build both toolchain images, run the RISC-V self-test
+# suite, and run the cross-target (RISC-V vs Cortex-M7) portability comparison.
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test-compare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ---- toolchain images, built with layer caching ----------------------
+      # cache-to/from (type=gha) reuses layers across runs, so the one-time
+      # ~500MB xPack toolchain download in the RISC-V image isn't repeated.
+      # load: true puts the image in the local daemon so `docker run` / the
+      # compare script find it by tag (no rebuild).
+      - name: Build RISC-V toolchain image (cached)
+        uses: docker/build-push-action@v6
+        with:
+          context: riscv
+          tags: riscv-baremetal:latest
+          load: true
+          cache-from: type=gha,scope=riscv-baremetal
+          cache-to: type=gha,mode=max,scope=riscv-baremetal
+
+      - name: Build Cortex-M7 toolchain image (cached)
+        uses: docker/build-push-action@v6
+        with:
+          context: m7
+          tags: m7-baremetal:latest
+          load: true
+          cache-from: type=gha,scope=m7-baremetal
+          cache-to: type=gha,mode=max,scope=m7-baremetal
+
+      # ---- RISC-V bare-metal self-test suite -------------------------------
+      - name: RVV self-test suite (must pass)
+        run: docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work" -w /work/riscv riscv-baremetal make test
+
+      - name: Negative-path check (injected failure must be caught)
+        run: docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work" -w /work/riscv riscv-baremetal make test-negative
+
+      # ---- cross-target portability comparison -----------------------------
+      # compare.sh reuses the images built above (it only builds them if
+      # missing). Fails the job if any portable kernel result diverges.
+      - name: Cross-target comparison (results must match)
+        run: make compare
+
+      # Meta-check: the deliberately non-portable probes MUST diverge. If they
+      # don't, the detector itself is broken - so a clean run here is failure.
+      - name: Hazard detector self-check (probes must diverge)
+        run: |
+          if ./compare/compare.sh hazards; then
+            echo "::error::hazard probes did not diverge - portability detector is broken"
+            exit 1
+          fi
+          echo "hazard probes diverged as expected - detector OK"
+
+      # Informational only: how the same C compiled on each target (RVV vs
+      # scalar, libcalls, instruction mix). Diagnostic, not a gate -
+      # continue-on-error keeps a bad dump from failing the build.
+      - name: Codegen fingerprint (informational)
+        continue-on-error: true
+        run: make compare-codegen
