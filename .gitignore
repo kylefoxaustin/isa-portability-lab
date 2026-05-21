@@ -4,3 +4,4 @@ build/
 *.dis
 *.map
 *.o
+report.json

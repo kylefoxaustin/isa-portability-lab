@@ -118,13 +118,26 @@ still hold. Adding a *third* leg is the same shape: a new peer directory with a
 Dockerfile + Makefile that compiles the shared `portable/` set, plus an arm in
 `compare/`.
 
-## CI
+## CI and run reports
 
 `.github/workflows/ci.yml` runs on every push and PR (with Docker layer
 caching): it builds both toolchain images, runs the RISC-V self-test suite +
 negative-path check, runs `make compare` (must match), asserts the hazard
 probes still diverge (so a broken detector also fails CI), and prints the
 codegen fingerprint as an informational, non-gating step.
+
+Each run reports its results natively on GitHub — no external dashboard needed:
+
+- **Job Summary**: the comparison renders as Markdown tables (computation
+  PASS/FAIL + the ABI diff) right on the run's page, with the codegen
+  fingerprint folded into a collapsible block.
+- **Artifact**: a machine-readable `report.json` is uploaded on every run
+  (`compute` rows, `abi` rows, `combined` hash, `verdict`).
+
+The same outputs are available locally — set `REPORT_MD=summary.md` and/or
+`REPORT_JSON=report.json` when running `make compare`. `report.json` is the
+stable contract a future dashboard (e.g. a Streamlit cross-run trend view)
+would consume.
 
 ## Requirements
 

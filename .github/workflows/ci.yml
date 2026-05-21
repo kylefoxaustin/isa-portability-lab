@@ -47,9 +47,18 @@ jobs:
 
       # ---- cross-target portability comparison -----------------------------
       # compare.sh reuses the images built above (it only builds them if
-      # missing). Fails the job if any portable kernel result diverges.
+      # missing). Fails the job if any portable kernel result diverges. The
+      # report.py reporter also writes a Markdown table to the run's Job Summary
+      # (GITHUB_STEP_SUMMARY) and a machine-readable report.json.
       - name: Cross-target comparison (results must match)
-        run: make compare
+        run: REPORT_MD="$GITHUB_STEP_SUMMARY" REPORT_JSON=report.json make compare
+
+      - name: Upload comparison report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: portability-report
+          path: report.json
 
       # Meta-check: the deliberately non-portable probes MUST diverge. If they
       # don't, the detector itself is broken - so a clean run here is failure.
@@ -62,8 +71,19 @@ jobs:
           echo "hazard probes diverged as expected - detector OK"
 
       # Informational only: how the same C compiled on each target (RVV vs
-      # scalar, libcalls, instruction mix). Diagnostic, not a gate -
-      # continue-on-error keeps a bad dump from failing the build.
+      # scalar, libcalls, instruction mix). Diagnostic, not a gate. Echoed to
+      # the step log and folded into the Job Summary as a collapsible block.
       - name: Codegen fingerprint (informational)
         continue-on-error: true
-        run: make compare-codegen
+        run: |
+          out="$(make compare-codegen)"
+          echo "$out"
+          {
+            echo '## Codegen fingerprint (informational)'
+            echo '<details><summary>RISC-V vs Cortex-M7 instruction fingerprint</summary>'
+            echo
+            echo '```'
+            printf '%s\n' "$out" | sed -n '/=== codegen/,$p'
+            echo '```'
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"

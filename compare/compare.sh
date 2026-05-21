@@ -52,6 +52,9 @@ M7_QEMU="qemu-system-arm -M mps2-an500 -semihosting -nographic \
 ensure_image "$RV_IMAGE" "riscv"
 ensure_image "$M7_IMAGE" "m7"
 
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
 echo ">> [$MODE] building + running RISC-V (rv64) leg ..."
 docker run --rm -u "$UG" -v "$ROOT:/work" -w /work/riscv "$RV_IMAGE" $RV_MK >/dev/null
 RV_RAW="$(docker run --rm -u "$UG" -v "$ROOT:/work" -w /work/riscv "$RV_IMAGE" sh -c "$RV_QEMU")"
@@ -62,46 +65,13 @@ M7_RAW="$(docker run --rm -u "$UG" -v "$ROOT:/work" -w /work/m7 "$M7_IMAGE" sh -
 
 # Normalize: drop CR, blank lines, and QEMU's RVV version notice.
 norm() { tr -d '\r' | sed '/^[[:space:]]*$/d; /vector version is not specified/d'; }
-RV="$(printf '%s\n' "$RV_RAW" | norm)"
-M7="$(printf '%s\n' "$M7_RAW" | norm)"
+printf '%s\n' "$RV_RAW" | norm > "$tmp/rv.txt"
+printf '%s\n' "$M7_RAW" | norm > "$tmp/m7.txt"
 
-# Partition lines.
-RV_INFO="$(printf '%s\n' "$RV" | grep -E '^info '            || true)"
-M7_INFO="$(printf '%s\n' "$M7" | grep -E '^info '            || true)"
-RV_COMP="$(printf '%s\n' "$RV" | grep -E '^([KH][0-9]|=== comb)' || true)"
-M7_COMP="$(printf '%s\n' "$M7" | grep -E '^([KH][0-9]|=== comb)' || true)"
-
-row() {   # $1=left $2=right $3=match-mark $4=diff-mark -> side-by-side table
-    # paste defaults to a TAB separator; the probe lines contain no tabs.
-    paste <(printf '%s\n' "$1") <(printf '%s\n' "$2") \
-    | awk -F'\t' -v ok="$3" -v bad="$4" '{
-        m = ($1==$2) ? ok : bad
-        printf "  %-3s %-32s | %-32s\n", m, $1, $2
-      }'
-}
-
-echo
-echo "================ ABI / type model (informational) ================"
-if [ -z "$RV_INFO$M7_INFO" ]; then
-    echo "  (this probe set emits no ABI/type lines)"
-else
-    printf "      %-34s | %-34s\n" "RISC-V (rv64)" "Cortex-M7 (ARM)"
-    row "$RV_INFO" "$M7_INFO" "=" "(!)"
-fi
-
-echo
-echo "================ computation (must match) ========================"
-printf "      %-34s | %-34s\n" "RISC-V (rv64)" "Cortex-M7 (ARM)"
-row "$RV_COMP" "$M7_COMP" "ok" "XX"
-
-echo
-echo "=================================================================="
-if diff -q <(printf '%s\n' "$RV_COMP") <(printf '%s\n' "$M7_COMP") >/dev/null; then
-    echo "VERDICT: PASS - all kernel results identical across targets."
-    echo "         (ABI/type differences above are expected, not failures.)"
-    exit 0
-else
-    echo "VERDICT: FAIL - computation diverged. Mismatched lines:"
-    diff <(printf '%s\n' "$RV_COMP") <(printf '%s\n' "$M7_COMP") | sed 's/^/    /'
-    exit 1
-fi
+# Render terminal table + verdict; optionally also emit machine-readable JSON
+# (REPORT_JSON) and GitHub job-summary Markdown (REPORT_MD), set by CI. The
+# exit code (0=match, 1=diverged) is the gate compare / CI key on.
+REPORT_ARGS=(--rv "$tmp/rv.txt" --m7 "$tmp/m7.txt" --mode "$MODE")
+[ -n "${REPORT_JSON:-}" ] && REPORT_ARGS+=(--json "$REPORT_JSON")
+[ -n "${REPORT_MD:-}" ]   && REPORT_ARGS+=(--md "$REPORT_MD")
+python3 "$ROOT/compare/report.py" "${REPORT_ARGS[@]}"
