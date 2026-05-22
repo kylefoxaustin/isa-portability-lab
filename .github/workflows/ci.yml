@@ -6,6 +6,11 @@ on:
   push:
   pull_request:
 
+# Opt JS-based actions into Node.js 24 ahead of the June 2026 default switch
+# (silences the Node.js 20 deprecation warning; version-agnostic).
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build-test-compare:
     runs-on: ubuntu-latest
