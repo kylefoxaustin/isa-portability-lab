@@ -123,12 +123,67 @@ void k_cdotprod_q15(const cq15_t *a, const cq15_t *b, size_t n, cq15_t *o)
 }
 
 /* ---- 5. FFT ------------------------------------------------------------- *
- * TODO(rvv): vectorized radix-2 butterflies (fixed-twiddle groups at stride
- * m are strided-segment-loadable). Reference fallback keeps this bit-exact
- * and green until the vectorized version lands + is verified. */
+ * Radix-2 DIT, N=64, >>1 per stage. Bit-reversal stays scalar (pure data
+ * movement). Within a stage, for a fixed butterfly index j the twiddle
+ * w=TW[j*tw_step] is CONSTANT across all N/m groups, whose (a,b) pairs sit at
+ * stride m - so each (stage,j) is a strided complex-segment vector op:
+ *   b' = cmul_q15(b, w)   [vwmul.vx + vnclip round>>15 == dsp_round_q_to_q15]
+ *   up = (a+b')>>1        [vwadd + vnsra.wi 1, truncating cast, always in range]
+ *   dn = (a-b')>>1
+ * Reproduces the reference's twiddle table, rounding and scaling bit-exactly. */
 void k_fft64_q15(cq15_t *d)
 {
+#ifdef HAVE_RVV
+    const int N = 64, LOG2N = 6;
+    /* bit-reversal permutation (identical to _ref) */
+    for (int i = 1, j = 0; i < N; i++) {
+        int bit = N >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) { cq15_t t = d[i]; d[i] = d[j]; d[j] = t; }
+    }
+    const cq15_t *TW = dsp_twiddle_q15();
+    int16_t *base = (int16_t *)d;                 /* interleaved re,im */
+    for (int s = 1; s <= LOG2N; s++) {
+        int m = 1 << s, half = m >> 1, tw_step = N / m, L = N / m;
+        ptrdiff_t stride = (ptrdiff_t)m * (ptrdiff_t)sizeof(cq15_t);
+        for (int jj = 0; jj < half; jj++) {
+            int16_t wr = TW[jj * tw_step].re, wi = TW[jj * tw_step].im;
+            size_t vl;
+            for (int off = 0; off < L; off += (int)vl) {
+                vl = __riscv_vsetvl_e16m1((size_t)(L - off));
+                int16_t *pa = base + 2 * (jj + off * m);
+                int16_t *pb = base + 2 * (jj + half + off * m);
+                vint16m1x2_t va = __riscv_vlsseg2e16_v_i16m1x2(pa, stride, vl);
+                vint16m1x2_t vb = __riscv_vlsseg2e16_v_i16m1x2(pb, stride, vl);
+                vint16m1_t ar = __riscv_vget_v_i16m1x2_i16m1(va, 0);
+                vint16m1_t ai = __riscv_vget_v_i16m1x2_i16m1(va, 1);
+                vint16m1_t br = __riscv_vget_v_i16m1x2_i16m1(vb, 0);
+                vint16m1_t bi = __riscv_vget_v_i16m1x2_i16m1(vb, 1);
+                /* b' = cmul_q15(b, w): round(b.re*w.re - b.im*w.im, 15), etc. */
+                vint32m2_t tre = __riscv_vsub_vv_i32m2(
+                    __riscv_vwmul_vx_i32m2(br, wr, vl),
+                    __riscv_vwmul_vx_i32m2(bi, wi, vl), vl);
+                vint32m2_t tim = __riscv_vadd_vv_i32m2(
+                    __riscv_vwmul_vx_i32m2(br, wi, vl),
+                    __riscv_vwmul_vx_i32m2(bi, wr, vl), vl);
+                vint16m1_t bpr = __riscv_vnclip_wx_i16m1(tre, 15, __RISCV_VXRM_RNU, vl);
+                vint16m1_t bpi = __riscv_vnclip_wx_i16m1(tim, 15, __RISCV_VXRM_RNU, vl);
+                /* up=(a+b')>>1, dn=(a-b')>>1 : widen, arith-shift-narrow (in range) */
+                vint16m1_t upr = __riscv_vnsra_wx_i16m1(__riscv_vwadd_vv_i32m2(ar, bpr, vl), 1, vl);
+                vint16m1_t upi = __riscv_vnsra_wx_i16m1(__riscv_vwadd_vv_i32m2(ai, bpi, vl), 1, vl);
+                vint16m1_t dnr = __riscv_vnsra_wx_i16m1(__riscv_vwsub_vv_i32m2(ar, bpr, vl), 1, vl);
+                vint16m1_t dni = __riscv_vnsra_wx_i16m1(__riscv_vwsub_vv_i32m2(ai, bpi, vl), 1, vl);
+                __riscv_vssseg2e16_v_i16m1x2(pa, stride,
+                    __riscv_vcreate_v_i16m1x2(upr, upi), vl);
+                __riscv_vssseg2e16_v_i16m1x2(pb, stride,
+                    __riscv_vcreate_v_i16m1x2(dnr, dni), vl);
+            }
+        }
+    }
+#else
     k_fft64_q15_ref(d);
+#endif
 }
 
 /* ---- 6. requantize int32 -> int8 --------------------------------------- *
