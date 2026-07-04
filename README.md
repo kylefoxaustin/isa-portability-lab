@@ -10,8 +10,8 @@ RISC-V `rv64` (xPack `riscv-none-elf-gcc`) and ARM Cortex-M7
   force different lowering? (performance portability)
 
 Each target is a self-contained, swappable Docker "leg." You can drive a
-**comparison** across both, or just use **one leg standalone** as a bare-metal
-toolchain in a box.
+**comparison** across a pair of legs, or just use **one leg standalone** as a
+bare-metal toolchain in a box.
 
 A second experiment — the **[DSP arm](#the-dsp-arm-intrinsic-kernels)** — adds a
 third leg (Tensilica `dc233c`) and asks a different question: how do hand-written
@@ -21,7 +21,10 @@ portable-C auto-lowering results above.
 
 ## Layout
 
-The two legs are symmetric peers; the probe sources and dispatcher are shared.
+The legs are symmetric peers; the shared sources and host-side dispatchers are
+split by experiment — `portable/` + `compare/compare.sh` for the auto-lowering
+comparison (riscv + m7), `kernels/` + `harness/` + `compare/dsp.sh` for the DSP
+arm (riscv + xtensa).
 
 ```
 .
@@ -29,7 +32,7 @@ The two legs are symmetric peers; the probe sources and dispatcher are shared.
 ├── riscv/                RISC-V rv64 leg  - Dockerfile + Makefile + sources + its own README
 ├── m7/                   Cortex-M7 leg    - Dockerfile + Makefile + sources
 ├── xtensa/               Xtensa dc233c leg (DSP arm) - Dockerfile + Makefile + reset/vector glue
-├── portable/             shared probe sources for the AUTO-LOWERING experiment (both legs)
+├── portable/             shared probe sources for the AUTO-LOWERING experiment (riscv + m7)
 │   ├── probe.h           REGISTER_PROBE registry + checksum helper
 │   ├── probe_runner.c    shared driver that walks the registry
 │   ├── probes/           portable probe set   (drop a .c here to add one)
@@ -94,11 +97,16 @@ docker run --rm -it -v "$PWD:/work" -w /work/riscv riscv-baremetal make run
 docker build -t m7-baremetal m7
 docker run --rm -v "$PWD:/work" -w /work/m7 m7-baremetal make
 docker run --rm -v "$PWD:/work" -w /work/m7 m7-baremetal make run
+
+# Xtensa dc233c (DSP arm): build + run the fixed-point kernel harness vs golden
+docker build -t xtensa-baremetal xtensa
+docker run --rm -v "$PWD:/work" -w /work/xtensa xtensa-baremetal make run
 ```
 
 The RISC-V leg ships a 35-test self-checking RVV/Zb*/Zfh regression suite and a
 stubbed accelerator-intrinsic seam — see [`riscv/README.md`](riscv/README.md)
-for the full details.
+for the full details. The Xtensa leg runs the shared DSP harness on the free
+`dc233c` core — see [the DSP arm](#the-dsp-arm-intrinsic-kernels) below.
 
 ## The DSP arm (intrinsic kernels)
 
@@ -181,12 +189,17 @@ touches **one directory** and never the other leg or the shared probes:
   `docker build -t riscv-baremetal riscv`.
 - **Cortex-M7**: change the toolchain install in `m7/Dockerfile` (or pin a
   specific `gcc-arm-none-eabi`), then `docker build -t m7-baremetal m7`.
+- **Xtensa**: bump `ARG ZSDK_VERSION` in `xtensa/Dockerfile`, then
+  `docker build -t xtensa-baremetal xtensa`.
 
 Adjust that leg's CPU/ISA flags in its own `Makefile` (e.g. RISC-V `ARCH`/`ABI`,
-M7 `MCPU`) as needed. Re-run `make compare` to confirm the cross-target results
-still hold. Adding a *third* leg is the same shape: a new peer directory with a
-Dockerfile + Makefile that compiles the shared `portable/` set, plus an arm in
-`compare/`.
+M7 `MCPU`, Xtensa `XT_CORE`) as needed. Re-run the relevant comparison to
+confirm results still hold. Adding another leg is the same shape: a new peer
+directory with a Dockerfile + Makefile that compiles a shared source set —
+`portable/` for the auto-lowering experiment, or `kernels/` + `harness/` for the
+DSP arm — plus an arm in `compare/`. The `xtensa/` leg is exactly that for the
+DSP arm (and shows how a leg can bring a different toolchain model — reset-vector
+placement + semihosting — without disturbing the others).
 
 ## CI and run reports
 
