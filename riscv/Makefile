@@ -64,7 +64,7 @@ OBJS    := $(addprefix build/, $(SRCS_C:.c=.o) $(SRCS_S:.S=.o))
 TARGET  := build/hello
 
 # ----- Rules -----------------------------------------------------------------
-.PHONY: all run test test-negative portable portable-run hazards clean dump
+.PHONY: all run test test-negative portable portable-run hazards dsp dsp-run clean dump
 
 all: $(TARGET).elf $(TARGET).bin $(TARGET).dis
 
@@ -196,6 +196,58 @@ portable-run: $(PORTABLE_ELF)
 	    -bios none \
 	    -kernel $(PORTABLE_ELF) \
 	    -nographic
+
+# ----- DSP kernel equivalence harness (the DSP arm, RVV side) ----------------
+# Runs the shared ../harness/run_kernels.c against ../kernels/golden/*.txt with
+# the RVV intrinsic kernels (-DHAVE_RVV). This is the open-source-reachable
+# accelerator side of the DSP arm (HiFi is the same harness behind the firewall).
+# Bare-metal: crt0_dsp.S forwards main()'s exit code to sifive_test, and dsp_rt.c
+# supplies a tiny printf-over-UART so run_kernels.c stays unmodified + neutral.
+DSP_ARCH   ?= $(ARCH)
+DSP_CFLAGS := -march=$(DSP_ARCH) -mabi=$(ABI) -mcmodel=$(CMODEL) \
+              -ffreestanding -nostdlib -nostartfiles \
+              -fno-builtin -fno-common -fno-stack-protector -fno-pic -fno-pie \
+              -ffunction-sections -fdata-sections \
+              -O2 -g3 -Wall -Wextra \
+              -I../kernels -I../harness -DHAVE_RVV $(EXTRA_CFLAGS)
+DSP_LDFLAGS := -march=$(DSP_ARCH) -mabi=$(ABI) -mcmodel=$(CMODEL) \
+              -static -no-pie -nostdlib -nostartfiles \
+              -Wl,--gc-sections -Wl,--build-id=none \
+              -Wl,-Map=build/dsp.map -T link.ld
+
+DSP_OBJS := build/crt0_dsp.o build/trap.o build/dsp_rt.o \
+            build/dsp_run_kernels.o build/dsp_kernels_scalar.o build/dsp_kernels_rvv.o
+
+# golden_data.h is generated from the committed golden/*.txt (gitignored).
+../harness/golden_data.h: $(wildcard ../kernels/golden/*.txt) ../harness/golden_to_header.py
+	python3 ../harness/golden_to_header.py ../kernels/golden ../harness/golden_data.h
+
+build/dsp_rt.o: dsp_rt.c | build
+	$(CC) $(DSP_CFLAGS) -c $< -o $@
+build/dsp_run_kernels.o: ../harness/run_kernels.c ../harness/golden_data.h | build
+	$(CC) $(DSP_CFLAGS) -c $< -o $@
+build/dsp_kernels_scalar.o: ../kernels/dsp_kernels_scalar.c | build
+	$(CC) $(DSP_CFLAGS) -c $< -o $@
+build/dsp_kernels_rvv.o: ../kernels/dsp_kernels_rvv.c | build
+	$(CC) $(DSP_CFLAGS) -c $< -o $@
+
+build/dsp.elf: $(DSP_OBJS) link.ld
+	$(CC) $(DSP_LDFLAGS) $(DSP_OBJS) -o $@
+	@$(SIZE) $@
+
+dsp: build/dsp.elf
+
+# Run the DSP equivalence harness; exit code 0 == every RVV kernel bit-exact.
+dsp-run: build/dsp.elf
+	@echo "=== DSP kernel equivalence (RVV) in QEMU ==="
+	@timeout 15 qemu-system-riscv64 \
+	    -M virt \
+	    -cpu rv64,v=true,vlen=128,zba=true,zbb=true,zbs=true,zfh=true \
+	    -smp 1 -m 8M -bios none -kernel build/dsp.elf -nographic ; \
+	rc=$$? ; \
+	if [ $$rc -eq 0 ]; then echo "=== DSP RVV PASS (qemu exit 0) ===" ; \
+	elif [ $$rc -eq 124 ]; then echo "=== DSP TIMEOUT ===" ; exit 1 ; \
+	else echo "=== DSP RVV FAIL (qemu exit $$rc) ===" ; exit $$rc ; fi
 
 clean:
 	rm -rf build
