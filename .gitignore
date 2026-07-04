@@ -5,3 +5,6 @@ build/
 *.map
 *.o
 report.json
+
+# Generated from kernels/golden/*.txt by harness/golden_to_header.py
+harness/golden_data.h
