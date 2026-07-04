@@ -43,6 +43,16 @@ jobs:
           cache-from: type=gha,scope=m7-baremetal
           cache-to: type=gha,mode=max,scope=m7-baremetal
 
+      # DSP arm: the Zephyr-SDK dc233c toolchain + qemu-system-xtensa.
+      - name: Build Xtensa toolchain image (cached)
+        uses: docker/build-push-action@v6
+        with:
+          context: xtensa
+          tags: xtensa-baremetal:latest
+          load: true
+          cache-from: type=gha,scope=xtensa-baremetal
+          cache-to: type=gha,mode=max,scope=xtensa-baremetal
+
       # ---- RISC-V bare-metal self-test suite -------------------------------
       - name: RVV self-test suite (must pass)
         run: docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work" -w /work/riscv riscv-baremetal make test
@@ -74,6 +84,16 @@ jobs:
             exit 1
           fi
           echo "hazard probes diverged as expected - detector OK"
+
+      # ---- DSP arm: intrinsic-kernel equivalence ---------------------------
+      # A DIFFERENT experiment from the portable-C comparison above: the RVV
+      # (rv64) and dc233c (xtensa) legs run the shared DSP kernel harness, which
+      # self-checks each hand-written intrinsic kernel against kernels/golden/.
+      # Gates on the per-leg exit code (0 == every kernel bit-exact). Renders an
+      # intrinsic-kernel table into the Job Summary, kept distinct from the
+      # auto-lowering results above.
+      - name: DSP arm (intrinsic kernels must be bit-exact vs golden)
+        run: REPORT_MD="$GITHUB_STEP_SUMMARY" make compare-dsp
 
       # Informational only: how the same C compiled on each target (RVV vs
       # scalar, libcalls, instruction mix). Diagnostic, not a gate. Echoed to

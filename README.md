@@ -13,25 +13,40 @@ Each target is a self-contained, swappable Docker "leg." You can drive a
 **comparison** across both, or just use **one leg standalone** as a bare-metal
 toolchain in a box.
 
+A second experiment — the **[DSP arm](#the-dsp-arm-intrinsic-kernels)** — adds a
+third leg (Tensilica `dc233c`) and asks a different question: how do hand-written
+*intrinsic* kernels (RVV, and HiFi behind a firewall) compare on identical
+fixed-point workloads? Intrinsic-kernel results are reported separately from the
+portable-C auto-lowering results above.
+
 ## Layout
 
 The two legs are symmetric peers; the probe sources and dispatcher are shared.
 
 ```
 .
-├── Makefile              orchestrator: compare / compare-hazards / compare-codegen / images
+├── Makefile              orchestrator: compare / compare-hazards / compare-codegen / compare-dsp / images
 ├── riscv/                RISC-V rv64 leg  - Dockerfile + Makefile + sources + its own README
 ├── m7/                   Cortex-M7 leg    - Dockerfile + Makefile + sources
-├── portable/             shared probe sources, compiled identically by BOTH legs
+├── xtensa/               Xtensa dc233c leg (DSP arm) - Dockerfile + Makefile + reset/vector glue
+├── portable/             shared probe sources for the AUTO-LOWERING experiment (both legs)
 │   ├── probe.h           REGISTER_PROBE registry + checksum helper
 │   ├── probe_runner.c    shared driver that walks the registry
 │   ├── probes/           portable probe set   (drop a .c here to add one)
 │   └── hazards/          deliberately non-portable probes (the failure demo)
-├── compare/              host-side dispatcher
+├── kernels/              shared fixed-point DSP kernels for the INTRINSIC experiment
+│   ├── dsp_kernels.h     the kernel contract (Q-format signatures + round/sat helpers)
+│   ├── dsp_kernels_scalar.c   the scalar oracle (ground truth) + golden/
+│   ├── dsp_kernels_{rvv,hifi,baseline}.c   per-datapath intrinsic impls
+│   └── golden/           committed known-good output vectors (source of truth)
+├── harness/              on-target DSP equivalence harness + golden pipeline
+│   └── run_kernels.c     runs k_* vs golden, PASS/FAIL, exit code = gate
+├── compare/              host-side dispatchers
 │   ├── compare.sh        runs both legs and diffs results        (make compare)
 │   ├── codegen.sh        dumps + compares generated code          (make compare-codegen)
-│   └── codegen.py        ISA-neutral codegen fingerprint analyzer
-└── .github/workflows/    CI: self-test + cross-target compare on every push
+│   ├── codegen.py        ISA-neutral codegen fingerprint analyzer
+│   └── dsp.sh            DSP arm: intrinsic kernels vs golden      (make compare-dsp)
+└── .github/workflows/    CI: self-test + cross-target compare + DSP arm on every push
 ```
 
 ## Two ways to use it
@@ -45,6 +60,7 @@ then from the repo root:
 make compare           # compile on both legs, run both, diff results -> PASS/FAIL
 make compare-hazards   # same, on deliberately non-portable probes (a demo)
 make compare-codegen   # compare HOW it compiled: RVV vs scalar, FMA, libcalls, size
+make compare-dsp       # DSP arm: hand-written intrinsic kernels vs golden (see below)
 ```
 
 `make compare` builds the toolchain images on first use (or `make images` to
@@ -84,6 +100,60 @@ The RISC-V leg ships a 35-test self-checking RVV/Zb*/Zfh regression suite and a
 stubbed accelerator-intrinsic seam — see [`riscv/README.md`](riscv/README.md)
 for the full details.
 
+## The DSP arm (intrinsic kernels)
+
+The `riscv` and `m7` legs above answer *"how does the same portable C
+**auto-lower** across ISAs?"* The DSP arm answers a **different** question,
+because that one is a category error for a DSP: a DSP's value is in intrinsics
+and hand-tuned kernels, not in auto-vectorized portable C.
+
+> **DSP-arm question:** how do hand-written *intrinsic* kernels compare across
+> datapaths (**HiFi vs. RVV**) on identical fixed-point workloads?
+
+Results from this arm are **intrinsic-kernel** results and are reported
+separately from the portable-C legs' **auto-lowering** results. Every kernel is
+fixed-point (Q15/Q14, 64-bit accumulate) on purpose: the golden vectors are
+then unambiguous and **bit-exact**, and it is how real HiFi/Vision kernels
+actually run. (Float bit-exactness is the thing the portable-C legs already
+probe, and where FMA contraction/rounding legitimately diverges — we don't
+reopen it here.)
+
+```bash
+make compare-dsp     # RVV (rv64) + dc233c (xtensa) run the kernels vs golden
+```
+
+The scalar reference in `kernels/dsp_kernels_scalar.c` is the **oracle**; its
+outputs are frozen in `kernels/golden/`. Each accelerated build's public `k_*`
+kernels must reproduce those **bit-exactly** — that is what makes an eventual
+HiFi-vs-RVV comparison fair. Kernel set: FIR (Q15), biquad IIR (Q14), real dot
+product, complex dot product, 64-pt radix-2 FFT (Q15), NN requantize (i32→i8),
+int8 GEMM. On the `riscv` leg all seven are real **RVV 1.0** intrinsics and are
+bit-exact vs golden under QEMU.
+
+### What's reachable with open tools (honesty box)
+
+| Target | Open tools? | Notes |
+|---|---|---|
+| RISC-V **RVV 1.0** | **Yes** | The fair open-source counterpart to HiFi — real ratified `__riscv_*` intrinsics. |
+| Tensilica **dc233c** controller core | **Yes** | Zephyr-SDK GCC + `qemu-system-xtensa -M sim`. Scalar core — the plumbing baseline + portability point, *not* a DSP data point. |
+| Cadence **HiFi / Vision / Fusion** | **No** | The ISA extensions ship under NDA in the config overlay (needs Xtensa Xplorer + XCC + the proprietary ISS) — done behind the firewall. |
+
+### One vessel, three swappable args
+
+The `xtensa` leg is one vessel; the licensed HiFi build is the *same* vessel
+with three build args changed — no structural change:
+
+| arg | open default (dc233c) | inside the firewall (HiFi) |
+|---|---|---|
+| `XT_CC`  | `xtensa-dc233c_zephyr-elf-gcc` | `xt-clang` / `xt-xcc` |
+| `XT_CORE`| `dc233c` | licensed core config |
+| `XT_RUN` | `qemu-system-xtensa -M sim -cpu dc233c` | `xt-run` (ISS) |
+| impl     | `IMPL=dsp_kernels_baseline` | `IMPL=dsp_kernels_hifi HAVE=HAVE_HIFI` |
+
+`kernels/dsp_kernels_hifi.c` is left green-via-`_ref`-fallback with its
+`TODO(ACC)` seams intact, ready for the firewall session to fill with real HiFi
+intrinsics against the same golden bar.
+
 ## Adding a probe (drop-in)
 
 A probe is a function returning a `uint32_t` checksum of its result, registered
@@ -121,10 +191,12 @@ Dockerfile + Makefile that compiles the shared `portable/` set, plus an arm in
 ## CI and run reports
 
 `.github/workflows/ci.yml` runs on every push and PR (with Docker layer
-caching): it builds both toolchain images, runs the RISC-V self-test suite +
-negative-path check, runs `make compare` (must match), asserts the hazard
-probes still diverge (so a broken detector also fails CI), and prints the
-codegen fingerprint as an informational, non-gating step.
+caching): it builds all three toolchain images, runs the RISC-V self-test suite
++ negative-path check, runs `make compare` (must match), asserts the hazard
+probes still diverge (so a broken detector also fails CI), runs the **DSP arm**
+(`make compare-dsp` — the RVV and dc233c intrinsic kernels must be bit-exact vs
+golden), and prints the codegen fingerprint as an informational, non-gating
+step.
 
 Each run reports its results natively on GitHub — no external dashboard needed:
 
