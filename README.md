@@ -252,3 +252,11 @@ would consume.
 
 Docker, GNU `make`, `bash`, and `python3` on the host. The toolchains and QEMU
 live inside the images — nothing else to install.
+
+## Author
+
+**Kyle Fox** - [GitHub](https://github.com/kylefoxaustin)
+
+## License
+
+MIT License - Use freely for personal and commercial projects.
