@@ -9,7 +9,7 @@
 #   docker run --rm -v "$PWD:/work" -w /work/riscv riscv-baremetal make
 #   docker run --rm -v "$PWD:/work" -w /work/m7    m7-baremetal    make
 # =============================================================================
-.PHONY: images compare compare-hazards compare-codegen compare-dsp clean help
+.PHONY: images compare compare-hazards compare-codegen compare-dsp capabilities check-capabilities clean help
 
 help:
 	@echo "isa-portability-lab targets:"
@@ -18,6 +18,7 @@ help:
 	@echo "  make compare-hazards same, on the deliberately non-portable probes (demo)"
 	@echo "  make compare-codegen compare HOW the code compiled (RVV vs scalar, libcalls, size)"
 	@echo "  make compare-dsp     DSP arm: intrinsic kernels (RVV + dc233c) vs golden, bit-exact"
+	@echo "  make capabilities    regenerate the README 'What runs today' table from the golden roster"
 	@echo "  make clean           remove all legs' build/ dirs"
 	@echo ""
 	@echo "Single-leg builds run inside each container; see riscv/ and m7/."
@@ -46,6 +47,16 @@ compare-codegen:
 # per-leg exit code. Distinct from compare (auto-lowering behavioral diff).
 compare-dsp:
 	@./compare/dsp.sh
+
+# Regenerate the README "What runs today" table from the golden kernel roster.
+# The generator hard-errors if golden/*.txt, dsp_kernels.h, and its label map
+# disagree - so the table (and the roster) cannot silently drift.
+capabilities:
+	@python3 tools/gen-capabilities.py
+
+# CI gate: fail if the committed table is stale vs the roster (no write).
+check-capabilities:
+	@python3 tools/gen-capabilities.py --check
 
 clean:
 	rm -rf riscv/build m7/build xtensa/build

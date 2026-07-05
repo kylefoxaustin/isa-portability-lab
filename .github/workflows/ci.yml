@@ -17,6 +17,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Fast, no-Docker gate: the README "What runs today" table must match the
+      # kernel roster (golden/*.txt == dsp_kernels.h == the generator's map).
+      # Fails early if the table drifted or the rosters disagree.
+      - name: Capability table drift check
+        run: make check-capabilities
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
